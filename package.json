@@ -1,0 +1,11 @@
+{
+  "name": "planparse",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "phase0": "pnpm --filter @planparse/phase0 run cli",
+    "typecheck": "pnpm -r run typecheck",
+    "samples": "pnpm --filter @planparse/phase0 run samples"
+  },
+  "packageManager": "pnpm@12.4.1"
+}

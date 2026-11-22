@@ -1,0 +1,11 @@
+node_modules/
+.env
+out/
+*.traineddata
+dist/
+.cache/
+
+# Plans are never committed: they may be confidential (client drawings)
+# or third-party copyrighted. Download public samples with: pnpm samples
+samples/mall/
+samples/downloaded/
