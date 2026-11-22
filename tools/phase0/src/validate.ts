@@ -30,6 +30,21 @@ export function validatePlan(plan: Pick<ExtractedPlan, "spaces" | "wings">, toke
         issues.push({ severity: "warning", spaceCode: label(s), rule: "dims-not-in-ocr", message: `'${s.dimsMmText}' not found in cited snippets; check against the drawing` });
       }
     }
+    if (s.dimsFtText) {
+      // every number in the ft-in text should appear in what it cites (catches sizes built from dimension lines)
+      const cited = s.sourceTokenIds.map((id) => tokenById.get(id)?.text ?? "").join(" ");
+      const citedNums = new Set(cited.match(/\d+/g) ?? []);
+      const missingNums = (s.dimsFtText.match(/\d+/g) ?? []).filter((n) => !citedNums.has(n));
+      if (missingNums.length) {
+        // PDF text is exact, so a miss there means the size was probably computed → warning.
+        // OCR garbles ft-in text often, so for OCR sources the AI reading the image is normal → info.
+        const exact = s.sourceTokenIds.length > 0 && s.sourceTokenIds.every((id) => tokenById.get(id)?.source === "pdf");
+        issues.push({
+          severity: exact ? "warning" : "info", spaceCode: label(s), rule: "dims-not-in-ocr",
+          message: `'${s.dimsFtText}': ${missingNums.join(", ")} not in cited snippets; ${exact ? "may be computed, check against the drawing" : "read from the image (OCR could not confirm)"}`,
+        });
+      }
+    }
 
     // 3. mm vs feet-inches cross-check
     const chk = crossCheckDims(s.dimsMmText, s.dimsFtText);

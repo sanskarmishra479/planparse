@@ -3,8 +3,8 @@
 //   - "openai":     OpenAI directly with an OpenAI key (ids like "openai/gpt-6.2-sol")
 //
 // Speed: the slow part is the model *writing* output, so
-//   1. the plan is split into 5 calls that run at the same time:
-//        overview | units (left half) | units (right half) | circulation | toilets+service rooms
+//   1. the plan is split into 6 calls that run at the same time:
+//        overview | units (left) | units (right) | indoor circulation | entrances+outdoor | rooms
 //   2. the model writes a compact format (short keys, no boxes/notes); code expands it
 //   3. reasoning effort is set low (configurable)
 // Wings are assigned to spaces by position in code, so all calls agree.
@@ -63,6 +63,7 @@ const WireSpace = z.object({
   ft: z.string().nullable().describe("ft-in dims exactly as printed, e.g. 13'-3\"X21'"),
   wd: z.string().nullable().describe("printed width for passages, e.g. 7'"),
   s: z.array(z.string()).describe("snippet ids used"),
+  b: z.array(z.number()).describe("rough [x,y,w,h] of the space ONLY when s is empty; otherwise []"),
   k: z.number().describe("confidence 0..1"),
 });
 type WireSpace = z.infer<typeof WireSpace>;
@@ -74,7 +75,10 @@ const WireOverview = z.object({
   building: z.object({
     suggestedCode: z.string(), name: z.string().nullable(), type: z.string(), northDirection: z.string().nullable(),
   }),
-  floor: z.object({ level: z.number().nullable(), name: z.string().nullable() }),
+  floor: z.object({
+    level: z.number().nullable().describe("entrance/ground level = 0 (a house's main floor is 0), floors above 1, 2…, basements -1, -2…"),
+    name: z.string().nullable(),
+  }),
   wings: z.array(z.object({
     code: z.string(), name: z.string(), source: z.enum(["labelled", "inferred"]), reason: z.string(),
     box: z.array(z.number()).describe("[x,y,w,h] area of the image this wing covers"),
@@ -89,7 +93,12 @@ const PART_OVERVIEW: Part<z.infer<typeof WireOverview>> = {
   name: "overview",
   schema: WireOverview,
   task: `TASK: return only the overview: drawing title, building, floor, wings, external features, unreadable items.
-Wings: if the plan labels wings/blocks use them (source "labelled"); otherwise infer 3-5 wings from the layout. Name inferred wings by compass direction using the drawn north arrow (e.g. "North Wing", "East Wing", "Central"), not "left/right". Give each wing a box [x,y,w,h] covering its area; boxes should together cover the building without overlapping much.
+Wings: only for BIG buildings (mall, shopping centre, office complex, hospital, campus, large commercial or multi-block buildings) or when the plan itself labels wings/blocks.
+- Labelled wings/blocks: use them (source "labelled").
+- Big building without labels: infer 3-5 wings from the layout (source "inferred"). Name them by compass direction using the drawn north arrow (e.g. "North Wing", "East Wing", "Central"), not "left/right".
+- Houses, flats, villas and other small buildings: return wings [] (no wings).
+Give each wing a box [x,y,w,h] covering its area; boxes should together cover the building without overlapping much.
+floor.level: entrance/ground level is 0 (a house's main floor is 0); floors above are 1, 2…; basements -1, -2….
 building.suggestedCode: short, uppercase, human-friendly (e.g. "MALL-01", "RES-LAKEPOINT").
 externalFeatures: roads, directions ("Towards Bus Stand"), retaining walls, parking, landscape.`,
 };
@@ -106,16 +115,24 @@ function unitsPart(half: "left" | "right", W: number): Part<z.infer<typeof WireS
   };
 }
 
+const NOT_OTHERS = "Do not return leasable units, lofts, toilets, rooms or garages; other tasks return those.";
+
 const PART_CIRCULATION: Part<z.infer<typeof WireSpaces>> = {
   name: "circulation",
   schema: WireSpaces,
-  task: `TASK: return only CIRCULATION and OUTDOOR spaces: lobby, atrium, foyer, every passage/corridor (printed width in wd), otla/verandah, every staircase, lift, fire lift, escalator, every ramp, every entrance and emergency exit, steps, parking, open spaces. ${EVERY} Do not return leasable units, lofts, toilets or service rooms.`,
+  task: `TASK: return only INDOOR CIRCULATION: lobby, atrium, foyer, every passage/corridor/hall (printed width in wd), every staircase (internal), lift, fire lift, escalator, travelator. ${EVERY} ${NOT_OTHERS} Do not return entrances, exits, ramps, outside steps or outdoor spaces (another task returns those).`,
+};
+
+const PART_OUTDOOR: Part<z.infer<typeof WireSpaces>> = {
+  name: "entrances-outdoor",
+  schema: WireSpaces,
+  task: `TASK: return only ENTRANCES, EXITS and OUTDOOR spaces: every entrance and emergency exit, every ramp, entrance/outside steps, every otla/verandah segment, porches, porticos, patios, decks, balconies, drop-offs, open parking, open spaces. ${EVERY} ${NOT_OTHERS} Do not return lobbies, passages, internal staircases or lifts.`,
 };
 
 const PART_ROOMS: Part<z.infer<typeof WireSpaces>> = {
   name: "rooms",
   schema: WireSpaces,
-  task: `TASK: return only SANITARY, SERVICE and NON-LEASABLE ROOMS: ladies/gents/accessible toilet blocks, every W.C. cubicle, urinal, bath, washbasin area, every duct/shaft, electrical/pump/fire/HVAC/storage/security rooms. For a house or flat plan, also every room (kitchen, bedrooms, living, dining, bath, closet, pantry, laundry, garage, office, patio…). ${EVERY} Do not return shops/showrooms/stores, their lofts, or circulation spaces.`,
+  task: `TASK: return only ROOMS that are not leasable units: ladies/gents/accessible toilet blocks, every W.C. cubicle, urinal, bath, washbasin area, every fire duct (t "fire_duct") and other shaft (t "shaft"), electrical/pump/fire/HVAC/storage/security rooms, garages. For a house or flat plan, also every room (kitchen, bedrooms, living, dining, bath, shower, closet, pantry, laundry, mud room, office, garage…). ${EVERY} Do not return shops/showrooms/stores, their lofts, or circulation/outdoor spaces (lobby, passages, halls, stairs, entrances, patios, decks, porches — another task returns those).`,
 };
 
 const COMMON_RULES = `You extract structured data from architectural drawings (floor plans, mall plans, building plans).
@@ -124,8 +141,8 @@ You get the drawing image and the text snippets OCR or the PDF text layer alread
 
 Rules for spaces:
 - c: the plan's own code, normalised PREFIX-NUMBER ("SHOP-37", "SHOWROOM-3", "STORE-4", "STAIRCASE-2"). Merged units like "SHOP - 33,34": c "SHOP-33,34", m ["SHOP-33","SHOP-34"].
-- mm / ft: copy printed dimensions exactly. Never compute or "fix" numbers.
-- s: ids of the snippets you used; [] if read only from the image (then lower k).
+- mm / ft: only when a size label is printed for that space (e.g. "4025X6370" or "13'-6\\" X 15'-6\\"" written inside the room). Copy it exactly. Never compute sizes, never combine dimension-line values, never "fix" numbers; if no size label is printed, use null.
+- s: ids of the snippets you used; [] if read only from the image (then lower k and give a rough box in b).
 - t must be one of: ${JSON.stringify(SPACE_TYPE_GROUPS)}. Use "other" if nothing fits and keep the label in n.
 - Ignore title blocks, legends, notes, 3D renderings and sheet borders as spaces.
 - Keep n short. Output JSON only.`;
@@ -183,9 +200,10 @@ export async function extractWithAi(args: {
       callPart(ctx, unitsPart("left", W)),
       callPart(ctx, unitsPart("right", W)),
       callPart(ctx, PART_CIRCULATION),
+      callPart(ctx, PART_OUTDOOR),
       callPart(ctx, PART_ROOMS),
     ]);
-    overview = o.data; wire = dedupe(rest.flatMap((r) => r.data.spaces)); calls = [o, ...rest];
+    overview = o.data; wire = rest.flatMap((r) => r.data.spaces); calls = [o, ...rest];
   } else {
     const all: Part<z.infer<typeof WireOverview> & z.infer<typeof WireSpaces>> = {
       name: "all",
@@ -287,9 +305,10 @@ async function callPart<T>(ctx: CallCtx, part: Part<T>): Promise<CallResult<T>> 
 
 function expand(o: z.infer<typeof WireOverview>, wire: WireSpace[], tokens: TextToken[], back: number): ExtractedPlan {
   const byId = new Map(tokens.map((t) => [t.id, t]));
-  const spaces: ExtractedSpace[] = wire.map((w) => {
+  const all: ExtractedSpace[] = wire.map((w) => {
     const boxes = w.s.map((id) => byId.get(id)?.box).filter((b): b is TextToken["box"] => !!b);
-    const box = boxes.length ? unionBox(boxes) : null;
+    // position: from the snippets it was built from, else the AI's rough box
+    const box = boxes.length ? unionBox(boxes) : w.b.length === 4 ? (w.b as [number, number, number, number]) : null;
     return {
       code: w.c, name: w.n, type: w.t, category: w.g, wingCode: box ? wingFor(box, o.wings) : null,
       parentCode: w.p, mergedCodes: w.m, dimsMmText: w.mm, dimsFtText: w.ft, widthText: w.wd,
@@ -298,6 +317,7 @@ function expand(o: z.infer<typeof WireOverview>, wire: WireSpace[], tokens: Text
       sourceTokenIds: w.s, confidence: w.k, notes: null,
     };
   });
+  const spaces = dedupe(all);
   // a loft belongs to the same wing as its parent unit
   for (const s of spaces) {
     if (s.parentCode) s.wingCode = spaces.find((p) => p.code === s.parentCode)?.wingCode ?? s.wingCode;
@@ -315,8 +335,9 @@ function unionBox(boxes: TextToken["box"][]): [number, number, number, number] {
   return [x0, y0, x1 - x0, y1 - y0];
 }
 
-/** Wing whose area contains the space's centre (nearest wing if none does). */
+/** Wing whose area contains the space's centre (nearest wing if none does). No wings → null. */
 function wingFor(box: number[], wings: { code: string; box: number[] }[]): string | null {
+  if (!wings.length) return null;
   const cx = box[0]! + box[2]! / 2, cy = box[1]! + box[3]! / 2;
   let best: string | null = null, bestD = Infinity;
   for (const w of wings) {
@@ -328,16 +349,38 @@ function wingFor(box: number[], wings: { code: string; box: number[] }[]): strin
   return best;
 }
 
-/** Parallel calls can both return a borderline space; keep the first of each code. */
-function dedupe(spaces: WireSpace[]): WireSpace[] {
-  const seen = new Set<string>();
-  return spaces.filter((s) => {
-    if (!s.c) return true;
-    const key = `${s.c}|${s.t === "loft" ? "loft" : LEASABLE_TYPES.has(s.t as never) ? "unit" : s.t}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+/**
+ * Parallel calls can both return a borderline space. Drop a space if an earlier one
+ *  - has the same code (and same kind: unit / loft / shared type), or
+ *  - has no code, the same name, and sits in the same place (two different
+ *    "Bedroom"s in different places are both kept).
+ */
+function dedupe(spaces: ExtractedSpace[]): ExtractedSpace[] {
+  const kept: ExtractedSpace[] = [];
+  const codeKeys = new Set<string>();
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  for (const s of spaces) {
+    if (s.code) {
+      const key = `${s.code}|${s.type === "loft" ? "loft" : LEASABLE_TYPES.has(s.type as never) ? "unit" : s.type}`;
+      if (codeKeys.has(key)) continue;
+      codeKeys.add(key);
+      kept.push(s);
+      continue;
+    }
+    const dup = kept.some((k) => !k.code && norm(k.name) === norm(s.name) && samePlace(k, s));
+    if (!dup) kept.push(s);
+  }
+  return kept;
+}
+
+function samePlace(a: ExtractedSpace, b: ExtractedSpace): boolean {
+  if (a.sourceTokenIds.some((id) => b.sourceTokenIds.includes(id))) return true;
+  if (a.approxBox.length !== 4 || b.approxBox.length !== 4) return true; // no position → trust the name
+  const [ax, ay, aw, ah] = a.approxBox as [number, number, number, number];
+  const [bx, by, bw, bh] = b.approxBox as [number, number, number, number];
+  const ix = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+  const iy = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+  return (ix * iy) / (Math.min(aw * ah, bw * bh) || 1) > 0.3;
 }
 
 // ---------- helpers ----------

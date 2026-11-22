@@ -26,7 +26,7 @@ pnpm phase0 samples/mall/ground-floor.png --truth samples/mall/ground-truth.json
 pnpm phase0 samples/downloaded/lake-point.pdf --list-pages
 pnpm phase0 samples/downloaded/lake-point.pdf --page 6
 
-# Speed options: one big AI call instead of 5 parallel ones, or a different reasoning effort
+# Speed options: one big AI call instead of 6 parallel ones, or a different reasoning effort
 pnpm phase0 samples/mall/ground-floor.png --single
 pnpm phase0 samples/mall/ground-floor.png --effort medium   # minimal | low (default) | medium | high | none
 
@@ -59,7 +59,7 @@ Results are written to `out/<plan>/`:
    - unit code, mm dimension, ft dimension, category, or amenity
    - also builds a rules-only baseline result
 4. **AI** (`ai.ts`) — OpenAI direct or OpenRouter (`AI_PROVIDER` in `.env`):
-   - 5 calls run at the same time: overview (building, floor, wings), units in the left half, units in the right half, circulation, toilets and service rooms
+   - 6 calls run at the same time: overview (building, floor, wings), units in the left half, units in the right half, indoor circulation, entrances and outdoor, toilets/service/house rooms
    - the model writes a compact format, then code expands it and assigns wings by position
    - reasoning effort low; strict JSON checked against Zod; vendors are allow-listed
 5. **Validate** (`validate.ts`):

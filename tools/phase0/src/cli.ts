@@ -28,7 +28,7 @@ const { values, positionals } = parseArgs({
     "no-rotations": { type: "boolean", default: false },
     "list-pages": { type: "boolean", default: false },
     effort: { type: "string" },                       // minimal | low | medium | high | none
-    single: { type: "boolean", default: false },     // one AI call instead of 5 parallel calls
+    single: { type: "boolean", default: false },     // one AI call instead of 6 parallel calls
   },
 });
 
